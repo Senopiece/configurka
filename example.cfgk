@@ -1,0 +1,17 @@
+cache: redis {
+  host: "localhost",
+  port: 6379
+},
+
+cameras: [
+  {
+    sn: "GFX712",
+    focus: manual 100
+  },
+  {
+    sn: "GFX114",
+    focus: manual 100
+  }
+],
+
+fps: 30
