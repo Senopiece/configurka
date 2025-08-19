@@ -1,26 +1,22 @@
 from dataclasses import dataclass
 from typing import List, Tuple, Union
-from lark import Lark, Transformer, Token
+from lark import Lark, Transformer, Token, v_args
 
-# TODO: multiline string
+# TODO: try to parse with lalrl
 # TODO: uint, int
 
 grammar = r"""    
-    start: [filler root_entity] filler ["," filler]
-
-    ?root_entity: ESCAPED_STRING
-               | SIGNED_NUMBER
-               | record_content
-               | list_closure
-               | discriminator
+    start: record_items
 
     discriminator: CNAME (filler1 entity)?
 
-    list_closure: "[" [filler list_content] filler ["," filler] "]"
+    list_closure: "[" list_items "]"
+    list_items: [filler list_content] filler ["," filler]
     list_content: entity list_element*
     list_element: filler "," filler entity
 
-    record_closure: "{" [filler record_content] filler ["," filler] "}"
+    record_closure: "{" record_items "}"
+    record_items: [filler record_content] filler ["," filler]
     record_content: kv record_element*
     record_element: filler "," filler kv
     kv: CNAME filler ":" filler entity
@@ -137,23 +133,29 @@ class ListContent:
 
 
 @dataclass
-class ListClosure:
+class ListItems:
     content: Tuple[Filler, ListContent] | None
     filler: Filler
     after_trailing: Filler | None
 
     def restore(self) -> str:
         return (
-            "["
-            + (
+            (
                 self.content[0].restore() + self.content[1].restore()
                 if self.content
                 else ""
             )
             + self.filler.restore()
             + ("," + self.after_trailing.restore() if self.after_trailing else "")
-            + "]"
         )
+
+
+@dataclass
+class ListClosure:
+    items: ListItems
+
+    def restore(self) -> str:
+        return "[" + self.items.restore() + "]"
 
 
 @dataclass
@@ -198,23 +200,29 @@ class RecordContent:
 
 
 @dataclass
-class RecordClosure:
+class RecordItems:
     content: Tuple[Filler, RecordContent] | None
     filler: Filler
     after_trailing: Filler | None
 
     def restore(self) -> str:
         return (
-            "{"
-            + (
+            (
                 self.content[0].restore() + self.content[1].restore()
                 if self.content
                 else ""
             )
             + self.filler.restore()
             + ("," + self.after_trailing.restore() if self.after_trailing else "")
-            + "}"
         )
+
+
+@dataclass
+class RecordClosure:
+    items: RecordItems
+
+    def restore(self) -> str:
+        return "{" + self.items.restore() + "}"
 
 
 Entity = Union[
@@ -234,31 +242,10 @@ RootEntity = Union[
 ]
 
 
-@dataclass
-class ConfigurikAST:
-    content: Tuple[Filler, RootEntity] | None
-    filler: Filler
-    after_trailing: Filler | None
-
-    def restore(self) -> str:
-        return (
-            (
-                self.content[0].restore() + self.content[1].restore()
-                if self.content
-                else ""
-            )
-            + self.filler.restore()
-            + ("," + self.after_trailing.restore() if self.after_trailing else "")
-        )
-
-
 class ConfigurikTransformer(Transformer):
-    def start(self, args):
-        return ConfigurikAST(
-            content=(args[0], args[1]) if args[1] is not None else None,
-            filler=args[2],
-            after_trailing=args[3],
-        )
+    @v_args(inline=True)
+    def start(self, record_items):
+        return record_items
 
     def discriminator(self, args):
         name = args[0]
@@ -268,7 +255,10 @@ class ConfigurikTransformer(Transformer):
             return DiscriminatorEntity(name=name, data=(args[1], args[2]))
 
     def list_closure(self, args):
-        return ListClosure(
+        return ListClosure(*args)
+
+    def list_items(self, args):
+        return ListItems(
             content=(args[0], args[1]) if args[1] is not None else None,
             filler=args[2],
             after_trailing=args[3],
@@ -281,7 +271,10 @@ class ConfigurikTransformer(Transformer):
         return ListElement(*args)
 
     def record_closure(self, args):
-        return RecordClosure(
+        return RecordClosure(*args)
+
+    def record_items(self, args):
+        return RecordItems(
             content=(args[0], args[1]) if args[1] is not None else None,
             filler=args[2],
             after_trailing=args[3],
