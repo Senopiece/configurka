@@ -6,12 +6,12 @@ cache: redis {
 cameras: [
   {
     sn: "GFX712",
-    focus: manual 100
+    focus: auto,
   },
   {
     sn: "GFX114",
-    focus: manual 100
+    focus: manual 100,
   }
 ],
 
-fps: 30
+fps: 30,

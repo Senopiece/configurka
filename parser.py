@@ -1,100 +1,331 @@
-import json
-import sys
-from typing import NamedTuple, Union
-from lark import Lark, Transformer, v_args
-from lark.exceptions import UnexpectedInput
+from dataclasses import dataclass
+from typing import List, Tuple, Union
+from lark import Lark, Transformer, Token
 
-# TODO: rewrite manually with better error reports + neat integrated typing to enhance error reports even more
+# TODO: multiline string
+# TODO: uint, int
 
-grammar = r"""
-    start: implicit_record
-         | implicit_list
-         | enum
+grammar = r"""    
+    start: [filler root_entity] filler ["," filler]
 
-    implicit_record: pair ("," pair)*         -> record
-    implicit_list: entity ("," entity)+       -> list
+    ?root_entity: ESCAPED_STRING
+               | SIGNED_NUMBER
+               | record_content
+               | list_closure
+               | discriminator
 
-    ?entity: STRING        -> string
-           | SIGNED_NUMBER -> number
-           | list
-           | record
-           | enum
+    discriminator: CNAME (filler1 entity)?
 
-    list  : "[" [entity ("," entity)*] "]"
-    record : "{" [pair ("," pair)*] "}"
-    pair   : CNAME ":" entity
+    list_closure: "[" [filler list_content] filler ["," filler] "]"
+    list_content: entity list_element*
+    list_element: filler "," filler entity
 
-    enum   : CNAME entity?     -> enum_with_data
+    record_closure: "{" [filler record_content] filler ["," filler] "}"
+    record_content: kv record_element*
+    record_element: filler "," filler kv
+    kv: CNAME filler ":" filler entity
+
+    SPACING: /[ \t\r\n]+/
+    ML_COMMENT: "/*" /(.|\n)*?/ "*/"
+    SL_COMMENT: "//" /[^\n]*/
+    filler: (SPACING | ML_COMMENT | SL_COMMENT)*
+    filler1: (SPACING | ML_COMMENT | SL_COMMENT)+
+
+    ?entity: ESCAPED_STRING
+           | SIGNED_NUMBER
+           | record_closure
+           | list_closure
+           | discriminator
 
     %import common.CNAME
-    %import common.ESCAPED_STRING -> STRING
+    %import common.ESCAPED_STRING
     %import common.SIGNED_NUMBER
-    %import common.WS
-    %ignore WS
 """
 
+# --- AST dataclasses ---
 
-class ParsedEnum(NamedTuple):
+
+@dataclass
+class Spacing:
+    text: str
+
+    def restore(self) -> str:
+        return self.text
+
+
+@dataclass
+class Comment:
+    text: str
+
+    def restore(self) -> str:
+        raise NotImplementedError("Use subclass restore method")
+
+
+@dataclass
+class SinglelineComment(Comment):
+    def restore(self) -> str:
+        return "//" + self.text
+
+
+@dataclass
+class MultilineComment(Comment):
+    def restore(self) -> str:
+        return "/*" + self.text + "*/"
+
+
+@dataclass
+class Filler:
+    data: List[Union[Spacing, Comment]]
+
+    def restore(self) -> str:
+        return "".join(e.restore() for e in self.data)
+
+
+@dataclass
+class StringEntity:
+    raw: str
+
+    def restore(self) -> str:
+        return '"' + self.raw + '"'
+
+
+@dataclass
+class NumberEntity:
+    raw: str
+
+    def restore(self) -> str:
+        return self.raw
+
+
+@dataclass
+class DiscriminatorEntity:
     name: str
-    data: Union[None, str]
+    data: Tuple[Filler, "Entity"] | None
+
+    def restore(self) -> str:
+        if self.data is None:
+            return self.name
+        else:
+            filler, ent = self.data
+            return self.name + filler.restore() + ent.restore()
 
 
-@v_args(inline=True)
-class EntityTransformer(Transformer):
-    def start(self, value):
-        return value
+@dataclass
+class ListElement:
+    precomma_filler: Filler
+    postcomma_filler: Filler
+    entity: "Entity"
 
-    def string(self, s):
-        return s[1:-1]  # Remove quotes
-
-    def number(self, n):
-        try:
-            return int(n)
-        except ValueError:
-            return float(n)
-
-    def list(self, *items):
-        return list(items)
-
-    def record(self, *pairs):
-        return dict(pairs)
-
-    def pair(self, key, val):
-        return (str(key), val)
-
-    def enum_with_data(self, name, data=None):
-        return ParsedEnum(name=str(name), data=data if data is None else str(data))
+    def restore(self) -> str:
+        return (
+            self.precomma_filler.restore()
+            + ","
+            + self.postcomma_filler.restore()
+            + self.entity.restore()
+        )
 
 
-parser = Lark(grammar, parser="lalr", transformer=EntityTransformer())
+@dataclass
+class ListContent:
+    first_element: "Entity"
+    rest_elements: List[ListElement]
 
-# --- Example Usage ---
-
-
-def main():
-    if len(sys.argv) != 2:
-        print(f"Usage: {sys.argv[0]} <input_file>")
-        sys.exit(1)
-
-    filename = sys.argv[1]
-
-    try:
-        with open(filename, "r", encoding="utf-8") as f:
-            input_data = f.read()
-    except IOError as e:
-        print(f"Error reading file: {e}")
-        sys.exit(1)
-
-    try:
-        result = parser.parse(input_data)
-        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
-    except UnexpectedInput as e:
-        print("Parsing failed!")
-        print(f"Line {e.line}, Column {e.column}:")
-        print(e.get_context(input_data))
-        print(f"Error type: {type(e).__name__}")
-        sys.exit(1)
+    def restore(self) -> str:
+        return self.first_element.restore() + "".join(
+            e.restore() for e in self.rest_elements
+        )
 
 
-if __name__ == "__main__":
-    main()
+@dataclass
+class ListClosure:
+    content: Tuple[Filler, ListContent] | None
+    filler: Filler
+    after_trailing: Filler | None
+
+    def restore(self) -> str:
+        return (
+            "["
+            + (
+                self.content[0].restore() + self.content[1].restore()
+                if self.content
+                else ""
+            )
+            + self.filler.restore()
+            + ("," + self.after_trailing.restore() if self.after_trailing else "")
+            + "]"
+        )
+
+
+@dataclass
+class KVPair:
+    key: str
+    precolumn_filler: Filler
+    postcolumn_filler: Filler
+    data: "Entity"
+
+    def restore(self) -> str:
+        return (
+            self.key
+            + self.precolumn_filler.restore()
+            + ":"
+            + self.postcolumn_filler.restore()
+            + self.data.restore()
+        )
+
+
+@dataclass
+class RecordElement:
+    precomma_filler: Filler
+    postcomma_filler: Filler
+    kv_pair: KVPair
+
+    def restore(self) -> str:
+        return (
+            self.precomma_filler.restore()
+            + ","
+            + self.postcomma_filler.restore()
+            + self.kv_pair.restore()
+        )
+
+
+@dataclass
+class RecordContent:
+    first_pair: KVPair
+    rest_pairs: List[RecordElement]
+
+    def restore(self) -> str:
+        return self.first_pair.restore() + "".join(e.restore() for e in self.rest_pairs)
+
+
+@dataclass
+class RecordClosure:
+    content: Tuple[Filler, RecordContent] | None
+    filler: Filler
+    after_trailing: Filler | None
+
+    def restore(self) -> str:
+        return (
+            "{"
+            + (
+                self.content[0].restore() + self.content[1].restore()
+                if self.content
+                else ""
+            )
+            + self.filler.restore()
+            + ("," + self.after_trailing.restore() if self.after_trailing else "")
+            + "}"
+        )
+
+
+Entity = Union[
+    StringEntity,
+    NumberEntity,
+    DiscriminatorEntity,
+    ListClosure,
+    RecordClosure,
+]
+
+RootEntity = Union[
+    StringEntity,
+    NumberEntity,
+    DiscriminatorEntity,
+    ListClosure,
+    RecordContent,
+]
+
+
+@dataclass
+class ConfigurikAST:
+    content: Tuple[Filler, RootEntity] | None
+    filler: Filler
+    after_trailing: Filler | None
+
+    def restore(self) -> str:
+        return (
+            (
+                self.content[0].restore() + self.content[1].restore()
+                if self.content
+                else ""
+            )
+            + self.filler.restore()
+            + ("," + self.after_trailing.restore() if self.after_trailing else "")
+        )
+
+
+class ConfigurikTransformer(Transformer):
+    def start(self, args):
+        return ConfigurikAST(
+            content=(args[0], args[1]) if args[1] is not None else None,
+            filler=args[2],
+            after_trailing=args[3],
+        )
+
+    def discriminator(self, args):
+        name = args[0]
+        if len(args) == 1:
+            return DiscriminatorEntity(name=name, data=None)
+        else:
+            return DiscriminatorEntity(name=name, data=(args[1], args[2]))
+
+    def list_closure(self, args):
+        return ListClosure(
+            content=(args[0], args[1]) if args[1] is not None else None,
+            filler=args[2],
+            after_trailing=args[3],
+        )
+
+    def list_content(self, args):
+        return ListContent(args[0], args[1:])
+
+    def list_element(self, args):
+        return ListElement(*args)
+
+    def record_closure(self, args):
+        return RecordClosure(
+            content=(args[0], args[1]) if args[1] is not None else None,
+            filler=args[2],
+            after_trailing=args[3],
+        )
+
+    def record_content(self, args):
+        return RecordContent(args[0], args[1:])
+
+    def record_element(self, args):
+        return RecordElement(*args)
+
+    def kv(self, args):
+        return KVPair(*args)
+
+    def SPACING(self, tok: Token):
+        return Spacing(tok.value)
+
+    def ML_COMMENT(self, tok: Token):
+        return MultilineComment(tok.value[2:-2])
+
+    def SL_COMMENT(self, tok: Token):
+        return SinglelineComment(tok.value[2:])
+
+    def filler(self, args):
+        return Filler(args)
+
+    def filler1(self, args):
+        return Filler(args)
+
+    def CNAME(self, tok: Token):
+        return tok.value
+
+    def ESCAPED_STRING(self, tok: Token):
+        return StringEntity(tok.value[1:-1])
+
+    def SIGNED_NUMBER(self, tok: Token):
+        return NumberEntity(tok.value)
+
+
+parser = Lark(grammar, parser="earley")
+
+transformer = ConfigurikTransformer()
+
+
+def parse_configurik(text: str):
+    tree = parser.parse(text)
+    return transformer.transform(tree)
